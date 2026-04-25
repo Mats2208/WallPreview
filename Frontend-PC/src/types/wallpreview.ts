@@ -28,8 +28,19 @@ export type Layer = {
   y: number
   width: number
   height: number
+  quad?: {
+    tl: Point
+    tr: Point
+    br: Point
+    bl: Point
+  }
 }
 
 export type Scene = {
   layers: Layer[]
+}
+
+export type Point = {
+  x: number
+  y: number
 }
