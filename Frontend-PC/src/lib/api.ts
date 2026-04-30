@@ -5,5 +5,9 @@ export function authHeaders(token: string) {
 }
 
 export function fullUrl(path: string) {
+  if (path.startsWith('/assets/')) {
+    return path
+  }
+
   return path.startsWith('http') ? path : `${API_BASE}${path}`
 }

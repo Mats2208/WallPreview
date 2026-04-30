@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { ChangeEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { useWorkspace } from '../context/WorkspaceContext'
 import { fullUrl } from '../lib/api'
+import { withBuiltinUtilities } from '../lib/builtinAssets'
+import { DEFAULT_MODEL_SETTINGS, isObjAsset, renderModelToCanvas } from '../lib/model3d'
 import { loadImage, parseScene } from '../lib/scene'
-import type { Asset, Layer, Point, Project } from '../types/wallpreview'
+import type { Asset, Layer, ModelSettings, Point, Project } from '../types/wallpreview'
 
 type ImageFrame = {
   left: number
@@ -20,8 +22,10 @@ type Quad = NonNullable<Layer['quad']>
 type Corner = keyof Quad
 type DragMode = 'move' | 'right' | 'bottom' | 'corner' | Corner
 type ModifierKey = 'ctrl' | 'shift' | 'alt'
+type DockTab = 'all' | 'images' | 'models'
 
-const BIND_STORAGE_KEY = 'wallpreview_canvas_bind'
+const PERSPECTIVE_BIND_KEY = 'wallpreview_perspective_bind'
+const SCALE_FACTOR = 1.1
 
 export function DesignerPage() {
   const { id } = useParams()
@@ -30,14 +34,16 @@ export function DesignerPage() {
   const [layers, setLayers] = useState<Layer[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [frame, setFrame] = useState<ImageFrame | null>(null)
-  const [modifierKey, setModifierKey] = useState<ModifierKey>(() => readModifierBind())
-  const [modifierDown, setModifierDown] = useState(false)
-  const [bindsOpen, setBindsOpen] = useState(false)
+  const [perspectiveKey, setPerspectiveKey] = useState<ModifierKey>(() => readModifierBind())
+  const [perspectiveDown, setPerspectiveDown] = useState(false)
+  const [dockTab, setDockTab] = useState<DockTab>('all')
+  const [axisLock, setAxisLock] = useState<'x' | 'y' | null>(null)
   const undoStack = useRef<Layer[][]>([])
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const imageRef = useRef<HTMLImageElement | null>(null)
 
-  const utilities = assets.filter((asset) => asset.kind === 'UTILITY')
+  const utilities = useMemo(() => withBuiltinUtilities(assets), [assets])
+  const dockAssets = useMemo(() => filterDock(utilities, dockTab), [utilities, dockTab])
   const selectedLayer = layers.find((layer) => layer.id === selectedId) ?? null
   const wall = useMemo(
     () => assets.find((asset) => asset.id === project?.wall_asset_id),
@@ -60,11 +66,26 @@ export function DesignerPage() {
     function update() {
       const image = imageRef.current
       const canvas = canvasRef.current
-      if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      if (!canvas) {
         return
       }
 
       const container = canvas.getBoundingClientRect()
+      if (!image || !image.naturalWidth || !image.naturalHeight) {
+        if (container.width > 0 && container.height > 0) {
+          setFrame({
+            left: 0,
+            top: 0,
+            width: container.width,
+            height: container.height,
+            scale: 1,
+            naturalWidth: container.width,
+            naturalHeight: container.height,
+          })
+        }
+        return
+      }
+
       const imageRatio = image.naturalWidth / image.naturalHeight
       const containerRatio = container.width / container.height
       const width = containerRatio > imageRatio ? container.height * imageRatio : container.width
@@ -90,7 +111,7 @@ export function DesignerPage() {
 
   useEffect(() => {
     function keyDown(event: KeyboardEvent) {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) {
         return
       }
 
@@ -113,7 +134,7 @@ export function DesignerPage() {
           x: event.key === 'ArrowLeft' ? -amount : event.key === 'ArrowRight' ? amount : 0,
           y: event.key === 'ArrowUp' ? -amount : event.key === 'ArrowDown' ? amount : 0,
         }
-        commitLayer(selectedId, (layer) => moveLayerBy(layer, delta, frame))
+        commitLayer(selectedId, (layer) => moveLayerBy(layer, delta))
       }
     }
 
@@ -123,15 +144,15 @@ export function DesignerPage() {
 
   useEffect(() => {
     function syncModifier(event: KeyboardEvent) {
-      setModifierDown(
-        (modifierKey === 'ctrl' && event.ctrlKey) ||
-          (modifierKey === 'shift' && event.shiftKey) ||
-          (modifierKey === 'alt' && event.altKey),
+      setPerspectiveDown(
+        (perspectiveKey === 'ctrl' && event.ctrlKey) ||
+          (perspectiveKey === 'shift' && event.shiftKey) ||
+          (perspectiveKey === 'alt' && event.altKey),
       )
     }
 
     function resetModifier() {
-      setModifierDown(false)
+      setPerspectiveDown(false)
     }
 
     window.addEventListener('keydown', syncModifier)
@@ -142,18 +163,24 @@ export function DesignerPage() {
       window.removeEventListener('keyup', syncModifier)
       window.removeEventListener('blur', resetModifier)
     }
-  }, [modifierKey])
+  }, [perspectiveKey])
 
   async function addUtility(asset: Asset) {
     if (!frame) {
       return
     }
 
-    const image = await loadImage(fullUrl(asset.public_url))
-    const defaultWidth = Math.min(frame.naturalWidth * 0.18, image.naturalWidth)
-    const defaultHeight = defaultWidth * (image.naturalHeight / image.naturalWidth)
-    const x = Math.max(0, frame.naturalWidth * 0.08 + layers.length * 24)
-    const y = Math.max(0, frame.naturalHeight * 0.08 + layers.length * 18)
+    const src = fullUrl(asset.public_url)
+    const isModel = isObjAsset(asset.name, asset.public_url)
+    let defaultWidth = frame.naturalWidth * 0.22
+    let defaultHeight = defaultWidth
+    if (!isModel) {
+      const image = await loadImage(src)
+      defaultWidth = Math.min(frame.naturalWidth * 0.2, image.naturalWidth)
+      defaultHeight = defaultWidth * (image.naturalHeight / image.naturalWidth)
+    }
+    const x = Math.max(0, frame.naturalWidth * 0.06 + layers.length * 24)
+    const y = Math.max(0, frame.naturalHeight * 0.06 + layers.length * 18)
     pushHistory()
 
     setLayers((current) => [
@@ -161,12 +188,14 @@ export function DesignerPage() {
       {
         id: crypto.randomUUID(),
         assetId: asset.id,
-        src: fullUrl(asset.public_url),
+        src,
         name: asset.name,
+        mediaType: isModel ? 'model3d' : 'image',
         x,
         y,
         width: defaultWidth,
         height: defaultHeight,
+        model: isModel ? { ...DEFAULT_MODEL_SETTINGS } : undefined,
       },
     ])
   }
@@ -181,7 +210,6 @@ export function DesignerPage() {
       setMessage('Nothing to undo.')
       return
     }
-
     setLayers(previous)
     setSelectedId(null)
   }
@@ -199,7 +227,6 @@ export function DesignerPage() {
     if (!selectedId) {
       return
     }
-
     pushHistory()
     setLayers((current) => current.filter((layer) => layer.id !== selectedId))
     setSelectedId(null)
@@ -209,14 +236,13 @@ export function DesignerPage() {
     if (!selectedLayer) {
       return
     }
-
     pushHistory()
     const clone = {
       ...cloneLayer(selectedLayer),
       id: crypto.randomUUID(),
       x: selectedLayer.x + 24,
       y: selectedLayer.y + 24,
-      quad: selectedLayer.quad ? moveQuad(selectedLayer.quad, { x: 24, y: 24 }, frame) : undefined,
+      quad: selectedLayer.quad ? moveQuad(selectedLayer.quad, { x: 24, y: 24 }) : undefined,
     }
     setLayers((current) => [...current, normalizeLayer(clone)])
     setSelectedId(clone.id)
@@ -226,8 +252,30 @@ export function DesignerPage() {
     if (!selectedLayer) {
       return
     }
-
     commitLayer(selectedLayer.id, (layer) => ({ ...layer, quad: undefined }))
+  }
+
+  function updateSelectedModel(settings: Partial<ModelSettings>) {
+    if (!selectedLayer || selectedLayer.mediaType !== 'model3d') {
+      return
+    }
+    applyLayer(selectedLayer.id, (layer) => ({
+      ...layer,
+      model: { ...DEFAULT_MODEL_SETTINGS, ...layer.model, ...settings },
+    }))
+  }
+
+  function updateSelectedTransform(input: Partial<Pick<Layer, 'x' | 'y' | 'width' | 'height'>>) {
+    if (!selectedLayer) {
+      return
+    }
+    applyLayer(selectedLayer.id, (layer) => ({
+      ...layer,
+      ...input,
+      width: input.width !== undefined ? Math.max(8, input.width) : layer.width,
+      height: input.height !== undefined ? Math.max(8, input.height) : layer.height,
+      quad: undefined,
+    }))
   }
 
   async function exportImage() {
@@ -247,6 +295,19 @@ export function DesignerPage() {
     context.drawImage(wallImage, 0, 0, canvas.width, canvas.height)
 
     for (const layer of layers) {
+      if (layer.mediaType === 'model3d') {
+        const modelCanvas = document.createElement('canvas')
+        modelCanvas.width = Math.max(1, Math.round(layer.width))
+        modelCanvas.height = Math.max(1, Math.round(layer.height))
+        await renderModelToCanvas({
+          canvas: modelCanvas,
+          src: layer.src,
+          settings: { ...DEFAULT_MODEL_SETTINGS, ...layer.model },
+        })
+        context.drawImage(modelCanvas, layer.x, layer.y, layer.width, layer.height)
+        continue
+      }
+
       const utilityImage = await loadImage(layer.src)
       if (isWarped(layer)) {
         await drawImageInQuad(context, utilityImage, getQuad(layer), 8)
@@ -261,9 +322,49 @@ export function DesignerPage() {
     link.click()
   }
 
-  function saveModifier(next: ModifierKey) {
-    setModifierKey(next)
-    localStorage.setItem(BIND_STORAGE_KEY, next)
+  function setPerspectiveBind(next: ModifierKey) {
+    setPerspectiveKey(next)
+    localStorage.setItem(PERSPECTIVE_BIND_KEY, next)
+  }
+
+  function handleCanvasWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!selectedLayer || !frame) {
+      return
+    }
+    const target = event.target as HTMLElement
+    if (!target.closest('.rect-layer') && !target.closest('.quad-move-target')) {
+      return
+    }
+
+    event.preventDefault()
+    const factor = Math.pow(SCALE_FACTOR, -event.deltaY / 100)
+    pushHistory()
+    applyLayer(selectedLayer.id, (layer) => {
+      const nextWidth = Math.max(8, layer.width * factor)
+      const nextHeight = Math.max(8, layer.height * factor)
+      const cx = layer.x + layer.width / 2
+      const cy = layer.y + layer.height / 2
+      const nextX = cx - nextWidth / 2
+      const nextY = cy - nextHeight / 2
+
+      if (layer.mediaType === 'model3d') {
+        return {
+          ...layer,
+          x: nextX,
+          y: nextY,
+          width: nextWidth,
+          height: nextHeight,
+        }
+      }
+
+      if (layer.quad) {
+        const center = { x: cx, y: cy }
+        const scaled = scaleQuadAround(layer.quad, center, factor)
+        return { ...layer, ...layerFromQuad(scaled) }
+      }
+
+      return { ...layer, x: nextX, y: nextY, width: nextWidth, height: nextHeight }
+    })
   }
 
   if (!id) {
@@ -273,25 +374,24 @@ export function DesignerPage() {
   return (
     <section className="designer-shell">
       <div className="designer-toolbar">
-        <Link className="nav-pill" to="/dashboard">Back</Link>
-        <div className="mr-auto">
-          <h1 className="text-2xl font-black tracking-tight">{project?.name ?? 'Project'}</h1>
-          <p className="text-xs uppercase tracking-[0.2em] text-stone-400">Hold {modifierLabel(modifierKey)} while dragging corners for perspective mode</p>
-        </div>
-        <button className="nav-pill" onClick={() => setBindsOpen(true)}>Binds</button>
+        <Link className="nav-pill" to="/dashboard" aria-label="Back to dashboard">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7" /></svg>
+          <span>Back</span>
+        </Link>
+        <span className="toolbar-divider" />
+        <button className="nav-pill" onClick={undo}>Undo</button>
+        <span className="toolbar-divider" />
+        <span className="toolbar-title">{project?.name ?? 'Project'}</span>
         <button className="nav-pill" onClick={() => project && saveProject(project.id, { layers })}>Save</button>
         <button className="nav-pill command-primary" onClick={exportImage}>Export PNG</button>
       </div>
       <div className="designer-workbench">
-        <InspectorPanel
-          selectedLayer={selectedLayer}
-          modifierKey={modifierKey}
-          onDelete={deleteSelected}
-          onDuplicate={duplicateSelected}
-          onResetPerspective={resetPerspective}
-          onUndo={undo}
-        />
-        <div className="canvas-zone" ref={canvasRef} onPointerDown={clearSelectionFromCanvas}>
+        <div
+          className="canvas-zone"
+          ref={canvasRef}
+          onPointerDown={clearSelectionFromCanvas}
+          onWheel={handleCanvasWheel}
+        >
           {wall ? (
             <img
               className="canvas-wall-image"
@@ -301,7 +401,7 @@ export function DesignerPage() {
               onLoad={() => window.dispatchEvent(new Event('resize'))}
             />
           ) : (
-            <div className="grid h-full place-items-center text-stone-500">Select a wall image from dashboard first.</div>
+            <div className="canvas-empty">Select a wall image from the dashboard first.</div>
           )}
           {frame ? (
             <div className="image-stage" style={{ left: frame.left, top: frame.top, width: frame.width, height: frame.height }}>
@@ -310,39 +410,50 @@ export function DesignerPage() {
                   key={layer.id}
                   frame={frame}
                   layer={layer}
-                  modifierKey={modifierKey}
-                  modifierDown={modifierDown}
+                  perspectiveKey={perspectiveKey}
+                  perspectiveDown={perspectiveDown}
+                  axisLock={selectedId === layer.id ? axisLock : null}
                   selected={selectedId === layer.id}
                   onSelect={() => setSelectedId(layer.id)}
                   onCommitStart={pushHistory}
                   onApply={applyLayer}
+                  onAxisLockChange={setAxisLock}
                 />
               ))}
             </div>
           ) : null}
         </div>
+        <InspectorPanel
+          selectedLayer={selectedLayer}
+          perspectiveKey={perspectiveKey}
+          onPerspectiveKeyChange={setPerspectiveBind}
+          onDelete={deleteSelected}
+          onDuplicate={duplicateSelected}
+          onResetPerspective={resetPerspective}
+          onModelChange={updateSelectedModel}
+          onTransformChange={updateSelectedTransform}
+          onUndo={undo}
+        />
       </div>
       <div className="utility-dock">
-        <div className="mr-3 min-w-56 border-r border-stone-700 pr-4">
-          <p className="text-xs uppercase tracking-[0.2em] text-[#fce100]">Utilities</p>
-          <p className="text-sm text-stone-300">Click to place. Resize normally; hold {modifierLabel(modifierKey)} for perspective.</p>
+        <div className="utility-dock-tabs">
+          <DockTabButton current={dockTab} value="all" onSelect={setDockTab}>All</DockTabButton>
+          <DockTabButton current={dockTab} value="images" onSelect={setDockTab}>Images</DockTabButton>
+          <DockTabButton current={dockTab} value="models" onSelect={setDockTab}>3D models</DockTabButton>
         </div>
-        <div className="flex gap-3 overflow-x-auto">
-          {utilities.map((asset) => (
-            <button className="dock-item" key={asset.id} onClick={() => void addUtility(asset)}>
-              <img className="h-16 w-20 object-contain" src={fullUrl(asset.public_url)} alt={asset.name} />
-              <span className="max-w-24 truncate text-xs">{asset.name}</span>
+        <div className="utility-dock-strip">
+          {dockAssets.map((asset) => (
+            <button className="dock-item" key={asset.id} onClick={() => void addUtility(asset)} title={asset.name}>
+              {isObjAsset(asset.name, asset.public_url) ? (
+                <span className="dock-model-preview">OBJ</span>
+              ) : (
+                <img src={fullUrl(asset.public_url)} alt={asset.name} />
+              )}
+              <span className="dock-item-name">{asset.name}</span>
             </button>
           ))}
         </div>
       </div>
-      {bindsOpen ? (
-        <BindModal
-          modifierKey={modifierKey}
-          onChange={saveModifier}
-          onClose={() => setBindsOpen(false)}
-        />
-      ) : null}
     </section>
   )
 
@@ -351,84 +462,202 @@ export function DesignerPage() {
     if (
       target === event.currentTarget ||
       target.classList.contains('canvas-wall-image') ||
-      target.classList.contains('image-stage')
+      target.classList.contains('image-stage') ||
+      target.classList.contains('canvas-empty')
     ) {
       setSelectedId(null)
     }
   }
 }
 
+function filterDock(assets: Asset[], tab: DockTab) {
+  if (tab === 'all') return assets
+  if (tab === 'models') return assets.filter((a) => isObjAsset(a.name, a.public_url))
+  return assets.filter((a) => !isObjAsset(a.name, a.public_url))
+}
+
+function DockTabButton({
+  current,
+  value,
+  children,
+  onSelect,
+}: {
+  current: DockTab
+  value: DockTab
+  children: React.ReactNode
+  onSelect: (value: DockTab) => void
+}) {
+  return (
+    <button className={`utility-dock-tab ${current === value ? 'is-on' : ''}`} onClick={() => onSelect(value)}>
+      {children}
+    </button>
+  )
+}
+
 function InspectorPanel({
   selectedLayer,
-  modifierKey,
+  perspectiveKey,
+  onPerspectiveKeyChange,
   onDelete,
   onDuplicate,
+  onModelChange,
+  onTransformChange,
   onResetPerspective,
   onUndo,
 }: {
   selectedLayer: Layer | null
-  modifierKey: ModifierKey
+  perspectiveKey: ModifierKey
+  onPerspectiveKeyChange: (key: ModifierKey) => void
   onDelete: () => void
   onDuplicate: () => void
+  onModelChange: (settings: Partial<ModelSettings>) => void
+  onTransformChange: (input: Partial<Pick<Layer, 'x' | 'y' | 'width' | 'height'>>) => void
   onResetPerspective: () => void
   onUndo: () => void
 }) {
+  const model = selectedLayer?.mediaType === 'model3d'
+    ? { ...DEFAULT_MODEL_SETTINGS, ...selectedLayer.model }
+    : null
+
   return (
     <aside className="designer-side-panel">
-      <p className="side-panel-kicker">Canvas tools</p>
-      <h2 className="side-panel-title">{selectedLayer ? selectedLayer.name : 'No selection'}</h2>
-      <div className="side-panel-section">
-        <button className="tool-button" disabled={!selectedLayer} onClick={onDuplicate}>Duplicate</button>
-        <button className="tool-button" disabled={!selectedLayer} onClick={onResetPerspective}>Reset perspective</button>
-        <button className="tool-button danger" disabled={!selectedLayer} onClick={onDelete}>Delete</button>
-        <button className="tool-button" onClick={onUndo}>Undo</button>
+      <div className="side-panel-section" style={{ marginTop: 0 }}>
+        <p className="side-panel-heading">Selection</p>
+        <p className="side-panel-title">{selectedLayer ? selectedLayer.name : 'No selection'}</p>
+        {selectedLayer ? (
+          <p className="side-panel-meta">
+            {selectedLayer.mediaType === 'model3d' ? '3D model' : 'Image layer'}
+          </p>
+        ) : (
+          <p className="side-panel-meta">Click any utility on the canvas to edit.</p>
+        )}
       </div>
-      <div className="side-panel-section text-sm text-stone-300">
-        <p><b>Move:</b> drag selected utility</p>
-        <p><b>Resize:</b> right, bottom, or corner handles</p>
-        <p><b>Perspective:</b> hold {modifierLabel(modifierKey)} and drag a corner</p>
-        <p><b>Delete:</b> Delete / Backspace</p>
-        <p><b>Undo:</b> Ctrl + Z</p>
-        <p><b>Nudge:</b> arrow keys, Shift for 10px</p>
+
+      {selectedLayer ? (
+        <div className="side-panel-section">
+          <p className="side-panel-heading">Transform</p>
+          <NumberPair label="X" value={selectedLayer.x} onChange={(x) => onTransformChange({ x })} />
+          <NumberPair label="Y" value={selectedLayer.y} onChange={(y) => onTransformChange({ y })} />
+          <NumberPair label="W" value={selectedLayer.width} min={8} onChange={(width) => onTransformChange({ width })} />
+          <NumberPair label="H" value={selectedLayer.height} min={8} onChange={(height) => onTransformChange({ height })} />
+        </div>
+      ) : null}
+
+      {model ? (
+        <div className="side-panel-section">
+          <p className="side-panel-heading">Rotation (deg)</p>
+          <SliderInput label="X" min={-360} max={360} value={model.rotationX} onChange={(rotationX) => onModelChange({ rotationX })} />
+          <SliderInput label="Y" min={-360} max={360} value={model.rotationY} onChange={(rotationY) => onModelChange({ rotationY })} />
+          <SliderInput label="Z" min={-360} max={360} value={model.rotationZ} onChange={(rotationZ) => onModelChange({ rotationZ })} />
+          <p className="side-panel-heading" style={{ marginTop: 8 }}>Zoom</p>
+          <SliderInput label="×" min={0.1} max={5} step={0.05} value={model.zoom} onChange={(zoom) => onModelChange({ zoom })} />
+        </div>
+      ) : null}
+
+      {selectedLayer ? (
+        <div className="side-panel-section">
+          <p className="side-panel-heading">Actions</p>
+          <button className="tool-button" onClick={onDuplicate}>Duplicate</button>
+          <button className="tool-button" disabled={selectedLayer.mediaType === 'model3d'} onClick={onResetPerspective}>Reset perspective</button>
+          <button className="tool-button danger" onClick={onDelete}>Delete</button>
+          <button className="tool-button" onClick={onUndo}>Undo</button>
+        </div>
+      ) : (
+        <div className="side-panel-section">
+          <p className="side-panel-heading">History</p>
+          <button className="tool-button" onClick={onUndo}>Undo</button>
+        </div>
+      )}
+
+      <div className="side-panel-section">
+        <p className="side-panel-heading">Perspective key</p>
+        <div className="segmented" role="radiogroup" aria-label="Perspective modifier key">
+          {(['ctrl', 'shift', 'alt'] as ModifierKey[]).map((key) => (
+            <button
+              key={key}
+              role="radio"
+              aria-checked={perspectiveKey === key}
+              className={perspectiveKey === key ? 'is-on' : ''}
+              onClick={() => onPerspectiveKeyChange(key)}
+            >
+              {modifierLabel(key)}
+            </button>
+          ))}
+        </div>
+        <p className="side-panel-meta">Hold while dragging a corner to warp the image.</p>
+      </div>
+
+      <div className="side-panel-section shortcut-hints">
+        <p className="side-panel-heading">Shortcuts</p>
+        <p>Drag to move · <kbd>X</kbd>/<kbd>Y</kbd> lock axis · <kbd>Esc</kbd> cancel drag</p>
+        <p>Wheel over selection to scale · <kbd>{modifierLabel(perspectiveKey)}</kbd>+drag corner = perspective</p>
+        <p>Arrows to nudge · <kbd>Shift</kbd>+arrows for 10px · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo</p>
       </div>
     </aside>
   )
 }
 
-function BindModal({
-  modifierKey,
+function NumberPair({
+  label,
+  value,
+  min,
   onChange,
-  onClose,
 }: {
-  modifierKey: ModifierKey
-  onChange: (key: ModifierKey) => void
-  onClose: () => void
+  label: string
+  value: number
+  min?: number
+  onChange: (value: number) => void
 }) {
   return (
-    <div className="modal-backdrop">
-      <section className="bind-modal">
-        <div className="flex items-start justify-between gap-6">
-          <div>
-            <p className="eyebrow">Canvas binds</p>
-            <h2 className="text-2xl font-black tracking-tight">Perspective modifier</h2>
-            <p className="mt-2 text-sm text-stone-500">Choose which key activates corner deformation while dragging.</p>
-          </div>
-          <button className="nav-pill" onClick={onClose}>Close</button>
-        </div>
-        <div className="mt-6 grid gap-3">
-          {(['ctrl', 'shift', 'alt'] as ModifierKey[]).map((key) => (
-            <label className="bind-option" key={key}>
-              <input
-                checked={modifierKey === key}
-                name="modifier"
-                onChange={() => onChange(key)}
-                type="radio"
-              />
-              <span>{modifierLabel(key)}</span>
-            </label>
-          ))}
-        </div>
-      </section>
+    <div className="numeric-row">
+      <label>{label}</label>
+      <span />
+      <input
+        type="number"
+        step={1}
+        min={min}
+        value={Number.isFinite(value) ? Math.round(value) : 0}
+        onChange={(event: ChangeEvent<HTMLInputElement>) => {
+          const next = Number(event.target.value)
+          if (!Number.isNaN(next)) {
+            onChange(next)
+          }
+        }}
+      />
+    </div>
+  )
+}
+
+function SliderInput({
+  label,
+  max,
+  min,
+  step = 1,
+  value,
+  onChange,
+}: {
+  label: string
+  max: number
+  min: number
+  step?: number
+  value: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <div className="numeric-row">
+      <label>{label}</label>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <input
+        type="number"
+        step={step}
+        value={Number.isFinite(value) ? Number(value.toFixed(2)) : 0}
+        onChange={(event: ChangeEvent<HTMLInputElement>) => {
+          const next = Number(event.target.value)
+          if (!Number.isNaN(next)) {
+            onChange(next)
+          }
+        }}
+      />
     </div>
   )
 }
@@ -436,24 +665,29 @@ function BindModal({
 function CanvasLayer({
   frame,
   layer,
-  modifierKey,
-  modifierDown,
+  perspectiveKey,
+  perspectiveDown,
+  axisLock,
   selected,
   onSelect,
   onCommitStart,
   onApply,
+  onAxisLockChange,
 }: {
   frame: ImageFrame
   layer: Layer
-  modifierKey: ModifierKey
-  modifierDown: boolean
+  perspectiveKey: ModifierKey
+  perspectiveDown: boolean
+  axisLock: 'x' | 'y' | null
   selected: boolean
   onSelect: () => void
   onCommitStart: () => void
   onApply: (id: string, updater: (layer: Layer) => Layer) => void
+  onAxisLockChange: (lock: 'x' | 'y' | null) => void
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const quad = getQuad(layer)
+  const isModel = layer.mediaType === 'model3d'
   const screenQuad = scaleQuad(quad, frame.scale)
   const screenRect = {
     left: layer.x * frame.scale,
@@ -467,9 +701,7 @@ function CanvasLayer({
 
     async function draw() {
       const canvas = canvasRef.current
-      if (!canvas) {
-        return
-      }
+      if (!canvas) return
 
       canvas.width = Math.max(1, Math.round(frame.width))
       canvas.height = Math.max(1, Math.round(frame.height))
@@ -477,14 +709,10 @@ function CanvasLayer({
       canvas.style.height = `${frame.height}px`
 
       const context = canvas.getContext('2d')
-      if (!context) {
-        return
-      }
+      if (!context) return
 
       context.clearRect(0, 0, canvas.width, canvas.height)
-      if (!isWarped(layer)) {
-        return
-      }
+      if (!isWarped(layer) || isModel) return
 
       const image = await loadImage(layer.src)
       if (!cancelled) {
@@ -496,7 +724,7 @@ function CanvasLayer({
     return () => {
       cancelled = true
     }
-  }, [frame.height, frame.width, layer.quad, layer.src, screenQuad.bl.x, screenQuad.bl.y, screenQuad.br.x, screenQuad.br.y, screenQuad.tl.x, screenQuad.tl.y, screenQuad.tr.x, screenQuad.tr.y])
+  }, [frame.height, frame.width, isModel, layer.quad, layer.src, screenQuad.bl.x, screenQuad.bl.y, screenQuad.br.x, screenQuad.br.y, screenQuad.tl.x, screenQuad.tl.y, screenQuad.tr.x, screenQuad.tr.y])
 
   function startPointer(event: ReactPointerEvent, requestedMode: DragMode) {
     event.preventDefault()
@@ -504,26 +732,30 @@ function CanvasLayer({
     onSelect()
     onCommitStart()
 
-    const perspectiveActive = isModifierActive(event, modifierKey)
+    const perspectiveActive = !isModel && isModifierActive(event, perspectiveKey)
     const mode = requestedMode === 'corner' && perspectiveActive ? 'br' : requestedMode
     const startClientX = event.clientX
     const startClientY = event.clientY
     const startLayer = cloneLayer(layer)
     const startQuad = cloneQuad(getQuad(layer))
+    let lockAxis: 'x' | 'y' | null = null
+    let cancelled = false
 
-    function pointerMove(moveEvent: PointerEvent) {
-      const delta = {
-        x: (moveEvent.clientX - startClientX) / frame.scale,
-        y: (moveEvent.clientY - startClientY) / frame.scale,
+    function applyDrag(clientX: number, clientY: number) {
+      const rawDelta = {
+        x: (clientX - startClientX) / frame.scale,
+        y: (clientY - startClientY) / frame.scale,
       }
+
+      const delta = mode === 'move' ? applyAxisLock(rawDelta, lockAxis) : rawDelta
 
       onApply(layer.id, () => {
         if (mode === 'move') {
-          return moveLayerBy(startLayer, delta, frame)
+          return moveLayerBy(startLayer, delta)
         }
 
         if (mode === 'right' || mode === 'bottom' || mode === 'corner') {
-          return resizeRectLayer(startLayer, delta, mode, frame)
+          return resizeRectLayer(startLayer, delta, mode)
         }
 
         if (!perspectiveActive) {
@@ -532,24 +764,67 @@ function CanvasLayer({
 
         const nextQuad = {
           ...startQuad,
-          [mode]: clampPoint(addPoint(startQuad[mode], delta), frame),
+          [mode]: addPoint(startQuad[mode], delta),
         }
         return { ...startLayer, ...layerFromQuad(nextQuad) }
       })
     }
 
-    function pointerUp() {
-      window.removeEventListener('pointermove', pointerMove)
-      window.removeEventListener('pointerup', pointerUp)
+    function pointerMove(moveEvent: PointerEvent) {
+      if (cancelled) return
+      applyDrag(moveEvent.clientX, moveEvent.clientY)
     }
 
-    window.addEventListener('pointermove', pointerMove)
+    function pointerUp() {
+      teardown()
+    }
+
+    function keyDown(keyEvent: KeyboardEvent) {
+      if (mode !== 'move') return
+      const key = keyEvent.key.toLowerCase()
+      if (key === 'x') {
+        keyEvent.preventDefault()
+        lockAxis = lockAxis === 'x' ? null : 'x'
+        onAxisLockChange(lockAxis)
+        applyDrag(lastClient.x, lastClient.y)
+      } else if (key === 'y') {
+        keyEvent.preventDefault()
+        lockAxis = lockAxis === 'y' ? null : 'y'
+        onAxisLockChange(lockAxis)
+        applyDrag(lastClient.x, lastClient.y)
+      } else if (keyEvent.key === 'Escape') {
+        keyEvent.preventDefault()
+        cancelled = true
+        onApply(layer.id, () => startLayer)
+        teardown()
+      }
+    }
+
+    function teardown() {
+      window.removeEventListener('pointermove', trackedMove)
+      window.removeEventListener('pointerup', pointerUp)
+      window.removeEventListener('keydown', keyDown)
+      onAxisLockChange(null)
+    }
+
+    const lastClient = { x: startClientX, y: startClientY }
+    function trackedMove(moveEvent: PointerEvent) {
+      lastClient.x = moveEvent.clientX
+      lastClient.y = moveEvent.clientY
+      pointerMove(moveEvent)
+    }
+
+    window.addEventListener('pointermove', trackedMove)
     window.addEventListener('pointerup', pointerUp)
+    window.addEventListener('keydown', keyDown)
   }
 
+  const showAxisX = selected && axisLock === 'x'
+  const showAxisY = selected && axisLock === 'y'
+
   return (
-    <div className={`canvas-layer-shell ${selected ? 'is-selected' : ''}`}>
-      {isWarped(layer) ? (
+    <div className={`canvas-layer-shell ${selected ? 'is-selected' : ''} ${axisLock ? 'is-locking' : ''}`}>
+      {isWarped(layer) && !isModel ? (
         <>
           <canvas className="quad-layer-canvas" ref={canvasRef} />
           <button
@@ -566,20 +841,24 @@ function CanvasLayer({
           style={screenRect}
           aria-label={`Move ${layer.name}`}
         >
-          <img className="h-full w-full object-fill" src={layer.src} alt={layer.name} draggable={false} />
+          {isModel ? (
+            <ModelLayerCanvas layer={layer} width={screenRect.width} height={screenRect.height} />
+          ) : (
+            <img className="h-full w-full select-none object-fill" src={layer.src} alt={layer.name} draggable={false} />
+          )}
         </button>
       )}
       {selected ? (
         <>
           <button
             className="rect-handle rect-right"
-            style={{ left: screenRect.left + screenRect.width - 4, top: screenRect.top + screenRect.height / 2 - 14 }}
+            style={{ left: screenRect.left + screenRect.width - 4, top: screenRect.top + screenRect.height / 2 - 12 }}
             onPointerDown={(event) => startPointer(event, 'right')}
             aria-label="Resize width"
           />
           <button
             className="rect-handle rect-bottom"
-            style={{ left: screenRect.left + screenRect.width / 2 - 14, top: screenRect.top + screenRect.height - 4 }}
+            style={{ left: screenRect.left + screenRect.width / 2 - 12, top: screenRect.top + screenRect.height - 4 }}
             onPointerDown={(event) => startPointer(event, 'bottom')}
             aria-label="Resize height"
           />
@@ -589,7 +868,7 @@ function CanvasLayer({
             onPointerDown={(event) => startPointer(event, 'corner')}
             aria-label="Resize or perspective corner"
           />
-          {modifierDown || isWarped(layer)
+          {!isModel && (perspectiveDown || isWarped(layer))
             ? (Object.keys(screenQuad) as Corner[]).map((corner) => (
                 <button
                   className={`quad-corner quad-corner-${corner}`}
@@ -597,52 +876,101 @@ function CanvasLayer({
                   onPointerDown={(event) => startPointer(event, corner)}
                   style={{ left: screenQuad[corner].x, top: screenQuad[corner].y }}
                   aria-label={`Move ${corner} corner`}
-                  title={`Hold ${modifierLabel(modifierKey)} for perspective handles`}
                 />
               ))
             : null}
+          {showAxisX ? (
+            <span className="axis-guide is-x" style={{ top: screenRect.top + screenRect.height / 2 }} />
+          ) : null}
+          {showAxisY ? (
+            <span className="axis-guide is-y" style={{ left: screenRect.left + screenRect.width / 2 }} />
+          ) : null}
         </>
       ) : null}
     </div>
   )
 }
 
-function normalizeLayer(layer: Layer): Layer {
-  if (!layer.quad) {
-    return layer
-  }
+function ModelLayerCanvas({ layer, width, height }: { layer: Layer; width: number; height: number }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  return { ...layer, ...layerFromQuad(layer.quad) }
+  useEffect(() => {
+    let cancelled = false
+
+    async function draw() {
+      const canvas = canvasRef.current
+      if (!canvas) return
+
+      canvas.width = Math.max(1, Math.round(width))
+      canvas.height = Math.max(1, Math.round(height))
+      canvas.style.width = `${width}px`
+      canvas.style.height = `${height}px`
+
+      try {
+        await renderModelToCanvas({
+          canvas,
+          src: layer.src,
+          settings: { ...DEFAULT_MODEL_SETTINGS, ...layer.model },
+        })
+      } catch {
+        if (!cancelled) {
+          const context = canvas.getContext('2d')
+          context?.clearRect(0, 0, canvas.width, canvas.height)
+        }
+      }
+    }
+
+    void draw()
+    return () => {
+      cancelled = true
+    }
+  }, [height, layer.model, layer.src, width])
+
+  return <canvas className="model-layer-canvas" ref={canvasRef} aria-label={layer.name} />
 }
 
-function resizeRectLayer(layer: Layer, delta: Point, mode: DragMode, frame: ImageFrame): Layer {
+function applyAxisLock(delta: Point, lock: 'x' | 'y' | null) {
+  if (lock === 'x') return { x: delta.x, y: 0 }
+  if (lock === 'y') return { x: 0, y: delta.y }
+  return delta
+}
+
+function normalizeLayer(layer: Layer): Layer {
+  const mediaType = layer.mediaType ?? (isObjAsset(layer.name, layer.src) ? 'model3d' : 'image')
+  const normalizedLayer = mediaType === 'model3d'
+    ? { ...layer, mediaType, model: { ...DEFAULT_MODEL_SETTINGS, ...layer.model }, quad: undefined }
+    : { ...layer, mediaType }
+
+  if (!normalizedLayer.quad) {
+    return normalizedLayer
+  }
+
+  return { ...normalizedLayer, ...layerFromQuad(normalizedLayer.quad) }
+}
+
+function resizeRectLayer(layer: Layer, delta: Point, mode: DragMode): Layer {
   if (layer.quad) {
-    return resizeWarpedLayer(layer, delta, mode, frame)
+    return resizeWarpedLayer(layer, delta, mode)
   }
 
   const width = mode === 'right' || mode === 'corner'
-    ? clamp(layer.width + delta.x, 16, frame.naturalWidth - layer.x)
+    ? Math.max(8, layer.width + delta.x)
     : layer.width
   const height = mode === 'bottom' || mode === 'corner'
-    ? clamp(layer.height + delta.y, 16, frame.naturalHeight - layer.y)
+    ? Math.max(8, layer.height + delta.y)
     : layer.height
 
-  return {
-    ...layer,
-    width,
-    height,
-    quad: undefined,
-  }
+  return { ...layer, width, height, quad: undefined }
 }
 
-function resizeWarpedLayer(layer: Layer, delta: Point, mode: DragMode, frame: ImageFrame): Layer {
+function resizeWarpedLayer(layer: Layer, delta: Point, mode: DragMode): Layer {
   const quad = getQuad(layer)
   const bounds = quadBounds(quad)
   const nextWidth = mode === 'right' || mode === 'corner'
-    ? clamp(bounds.width + delta.x, 16, frame.naturalWidth - bounds.left)
+    ? Math.max(8, bounds.width + delta.x)
     : bounds.width
   const nextHeight = mode === 'bottom' || mode === 'corner'
-    ? clamp(bounds.height + delta.y, 16, frame.naturalHeight - bounds.top)
+    ? Math.max(8, bounds.height + delta.y)
     : bounds.height
   const scaleX = bounds.width === 0 ? 1 : nextWidth / bounds.width
   const scaleY = bounds.height === 0 ? 1 : nextHeight / bounds.height
@@ -651,20 +979,16 @@ function resizeWarpedLayer(layer: Layer, delta: Point, mode: DragMode, frame: Im
   return { ...layer, ...layerFromQuad(nextQuad) }
 }
 
-function moveLayerBy(layer: Layer, delta: Point, frame: ImageFrame | null): Layer {
-  if (!frame) {
-    return layer
-  }
-
+function moveLayerBy(layer: Layer, delta: Point): Layer {
   if (layer.quad) {
-    const quad = moveQuad(layer.quad, delta, frame)
+    const quad = moveQuad(layer.quad, delta)
     return { ...layer, ...layerFromQuad(quad) }
   }
 
   return {
     ...layer,
-    x: clamp(layer.x + delta.x, 0, frame.naturalWidth - layer.width),
-    y: clamp(layer.y + delta.y, 0, frame.naturalHeight - layer.height),
+    x: layer.x + delta.x,
+    y: layer.y + delta.y,
   }
 }
 
@@ -682,10 +1006,7 @@ function getQuad(layer: Layer): Quad {
 }
 
 function isWarped(layer: Layer) {
-  if (!layer.quad) {
-    return false
-  }
-
+  if (!layer.quad) return false
   const rect = rectToQuad(layer.x, layer.y, layer.width, layer.height)
   return (Object.keys(rect) as Corner[]).some((corner) => distance(rect[corner], layer.quad![corner]) > 0.5)
 }
@@ -723,6 +1044,15 @@ function scaleQuadFromOrigin(quad: Quad, origin: Point, scaleX: number, scaleY: 
   }
 }
 
+function scaleQuadAround(quad: Quad, center: Point, factor: number): Quad {
+  return {
+    tl: { x: center.x + (quad.tl.x - center.x) * factor, y: center.y + (quad.tl.y - center.y) * factor },
+    tr: { x: center.x + (quad.tr.x - center.x) * factor, y: center.y + (quad.tr.y - center.y) * factor },
+    br: { x: center.x + (quad.br.x - center.x) * factor, y: center.y + (quad.br.y - center.y) * factor },
+    bl: { x: center.x + (quad.bl.x - center.x) * factor, y: center.y + (quad.bl.y - center.y) * factor },
+  }
+}
+
 function scalePointFromOrigin(point: Point, origin: Point, scaleX: number, scaleY: number): Point {
   return {
     x: origin.x + (point.x - origin.x) * scaleX,
@@ -750,41 +1080,17 @@ function cloneQuad(quad: Quad): Quad {
   }
 }
 
-function moveQuad(quad: Quad, delta: Point, frame: ImageFrame | null): Quad {
-  const moved = {
+function moveQuad(quad: Quad, delta: Point): Quad {
+  return {
     tl: addPoint(quad.tl, delta),
     tr: addPoint(quad.tr, delta),
     br: addPoint(quad.br, delta),
     bl: addPoint(quad.bl, delta),
   }
-
-  if (!frame) {
-    return moved
-  }
-
-  const bounds = quadBounds(moved)
-  const correction = {
-    x: bounds.left < 0 ? -bounds.left : bounds.left + bounds.width > frame.naturalWidth ? frame.naturalWidth - bounds.left - bounds.width : 0,
-    y: bounds.top < 0 ? -bounds.top : bounds.top + bounds.height > frame.naturalHeight ? frame.naturalHeight - bounds.top - bounds.height : 0,
-  }
-
-  return {
-    tl: addPoint(moved.tl, correction),
-    tr: addPoint(moved.tr, correction),
-    br: addPoint(moved.br, correction),
-    bl: addPoint(moved.bl, correction),
-  }
 }
 
 function addPoint(point: Point, delta: Point): Point {
   return { x: point.x + delta.x, y: point.y + delta.y }
-}
-
-function clampPoint(point: Point, frame: ImageFrame): Point {
-  return {
-    x: clamp(point.x, 0, frame.naturalWidth),
-    y: clamp(point.y, 0, frame.naturalHeight),
-  }
 }
 
 function quadBounds(quad: Quad) {
@@ -795,12 +1101,7 @@ function quadBounds(quad: Quad) {
   const right = Math.max(...xs)
   const bottom = Math.max(...ys)
 
-  return {
-    left,
-    top,
-    width: right - left,
-    height: bottom - top,
-  }
+  return { left, top, width: right - left, height: bottom - top }
 }
 
 async function drawImageInQuad(
@@ -845,10 +1146,7 @@ function interpolateQuad(quad: Quad, u: number, v: number): Point {
 }
 
 function lerpPoint(a: Point, b: Point, amount: number): Point {
-  return {
-    x: a.x + (b.x - a.x) * amount,
-    y: a.y + (b.y - a.y) * amount,
-  }
+  return { x: a.x + (b.x - a.x) * amount, y: a.y + (b.y - a.y) * amount }
 }
 
 function drawTexturedTriangle(
@@ -859,9 +1157,7 @@ function drawTexturedTriangle(
 ) {
   const expandedDestination = expandTriangle(destination, 0.85)
   const transform = triangleTransform(source, expandedDestination)
-  if (!transform) {
-    return
-  }
+  if (!transform) return
 
   context.save()
   context.beginPath()
@@ -920,14 +1216,14 @@ function triangleTransform(source: [Point, Point, Point], destination: [Point, P
 
 function isModifierActive(event: ReactPointerEvent, modifierKey: ModifierKey) {
   return (
-    (modifierKey === 'ctrl' && event.ctrlKey) ||
+    (modifierKey === 'ctrl' && (event.ctrlKey || event.metaKey)) ||
     (modifierKey === 'shift' && event.shiftKey) ||
     (modifierKey === 'alt' && event.altKey)
   )
 }
 
 function readModifierBind(): ModifierKey {
-  const value = localStorage.getItem(BIND_STORAGE_KEY)
+  const value = localStorage.getItem(PERSPECTIVE_BIND_KEY)
   return value === 'shift' || value === 'alt' || value === 'ctrl' ? value : 'ctrl'
 }
 
@@ -937,8 +1233,4 @@ function modifierLabel(key: ModifierKey) {
 
 function distance(a: Point, b: Point) {
   return Math.hypot(a.x - b.x, a.y - b.y)
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max)
 }

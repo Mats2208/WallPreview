@@ -24,10 +24,12 @@ export type Layer = {
   assetId: number
   src: string
   name: string
+  mediaType?: 'image' | 'model3d'
   x: number
   y: number
   width: number
   height: number
+  model?: ModelSettings
   quad?: {
     tl: Point
     tr: Point
@@ -38,6 +40,13 @@ export type Layer = {
 
 export type Scene = {
   layers: Layer[]
+}
+
+export type ModelSettings = {
+  rotationX: number
+  rotationY: number
+  rotationZ: number
+  zoom: number
 }
 
 export type Point = {

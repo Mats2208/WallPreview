@@ -24,10 +24,10 @@ export function ProfilePage() {
   }
 
   return (
-    <section className="mx-auto grid min-h-[calc(100vh-76px)] max-w-[1440px] place-items-center px-8 py-12">
+    <section className="auth-shell">
       <form className="auth-card" onSubmit={submit}>
-        <p className="eyebrow">Account settings</p>
-        <h1 className="text-4xl font-black tracking-tight">Profile</h1>
+        <h1 className="panel-title">Profile</h1>
+        <p className="panel-subtitle">Update your account name, email, or password.</p>
         <label className="field-label">
           Name
           <input className="field" value={name} onChange={(event) => setName(event.target.value)} required />
@@ -40,7 +40,7 @@ export function ProfilePage() {
           New password
           <input className="field" value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="Leave blank to keep current password" />
         </label>
-        {error ? <p className="mt-4 bg-red-100 p-3 text-sm text-red-700">{error}</p> : null}
+        {error ? <p className="auth-error">{error}</p> : null}
         <button className="action-primary mt-5 w-full">Save profile</button>
       </form>
     </section>

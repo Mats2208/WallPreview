@@ -1,16 +1,18 @@
 export function UploadCard({
   title,
   accept,
+  note = 'PNG, JPG, WEBP, AVIF, GIF or HEIC',
   onFile,
 }: {
   title: string
   accept: string
+  note?: string
   onFile: (file: File) => void
 }) {
   return (
     <label className="upload-card">
       <span>{title}</span>
-      <span className="mt-1 text-xs text-stone-500">PNG, JPG, WEBP, AVIF, GIF or HEIC</span>
+      <span className="upload-card-note">{note}</span>
       <input
         className="hidden"
         type="file"

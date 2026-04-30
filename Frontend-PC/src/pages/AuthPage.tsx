@@ -33,10 +33,14 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   }
 
   return (
-    <section className="mx-auto grid min-h-[calc(100vh-76px)] max-w-[1440px] place-items-center px-8 py-12">
+    <section className="auth-shell">
       <form className="auth-card" onSubmit={submit}>
-        <p className="eyebrow">{mode === 'login' ? 'Workspace access' : 'Create designer account'}</p>
-        <h1 className="text-4xl font-black tracking-tight">{mode === 'login' ? 'Login' : 'Register'}</h1>
+        <h1 className="panel-title">{mode === 'login' ? 'Sign in' : 'Create account'}</h1>
+        <p className="panel-subtitle">
+          {mode === 'login'
+            ? 'Access your workspace and continue where you left off.'
+            : 'Start a new designer account to upload walls and build previews.'}
+        </p>
         <label className="field-label">
           Email
           <input className="field" value={email} onChange={(event) => setEmail(event.target.value)} type="email" required />
@@ -51,10 +55,10 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
           Password
           <input className="field" value={password} onChange={(event) => setPassword(event.target.value)} type="password" required />
         </label>
-        {error ? <p className="mt-4 bg-red-100 p-3 text-sm text-red-700">{error}</p> : null}
-        <button className="action-primary mt-5 w-full">{mode === 'login' ? 'Enter dashboard' : 'Create account'}</button>
-        <Link className="mt-4 block w-full text-center text-sm font-bold text-stone-500" to={mode === 'login' ? '/register' : '/login'}>
-          {mode === 'login' ? 'Need an account?' : 'Already have an account?'}
+        {error ? <p className="auth-error">{error}</p> : null}
+        <button className="action-primary mt-5 w-full">{mode === 'login' ? 'Sign in' : 'Create account'}</button>
+        <Link className="auth-link" to={mode === 'login' ? '/register' : '/login'}>
+          {mode === 'login' ? 'Need an account? Register' : 'Already have an account? Sign in'}
         </Link>
       </form>
     </section>
